@@ -12,6 +12,8 @@ class SettingsError(Exception):
 @dataclass(frozen=True)
 class Settings:
     app_env: str
+    app_host: str
+    app_port: int
     log_level: str
 
     database_host: str
@@ -31,7 +33,8 @@ class Settings:
         # keep password out of logs and tracebacks
         return (
             "Settings("
-            f"app_env={self.app_env!r}, log_level={self.log_level!r}, "
+            f"app_env={self.app_env!r}, app_host={self.app_host!r}, "
+            f"app_port={self.app_port!r}, log_level={self.log_level!r}, "
             f"database_host={self.database_host!r}, database_port={self.database_port!r}, "
             f"database_name={self.database_name!r}, database_user={self.database_user!r}, "
             "database_password=***)"
@@ -82,6 +85,8 @@ def _int(name: str, default: int) -> int:
 def load_settings() -> Settings:
     return Settings(
         app_env=_optional("APP_ENV", "local"),
+        app_host=_optional("APP_HOST", "0.0.0.0"),
+        app_port=_int("APP_PORT", 8000),
         log_level=_optional("LOG_LEVEL", "INFO"),
         database_host=_required("DATABASE_HOST"),
         database_port=_int("DATABASE_PORT", 5432),

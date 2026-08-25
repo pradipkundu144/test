@@ -5,6 +5,8 @@ import pytest
 
 _APP_ENV_KEYS = (
     "APP_ENV",
+    "APP_HOST",
+    "APP_PORT",
     "LOG_LEVEL",
     "DATABASE_HOST",
     "DATABASE_PORT",

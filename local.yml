@@ -29,5 +29,24 @@ services:
       postgres:
         condition: service_healthy
 
+  api:
+    build: .
+    container_name: synapse-api
+    environment:
+      APP_ENV: ${APP_ENV}
+      APP_HOST: 0.0.0.0
+      APP_PORT: "8000"
+      LOG_LEVEL: ${LOG_LEVEL}
+      DATABASE_HOST: postgres
+      DATABASE_PORT: "5432"
+      DATABASE_NAME: ${DATABASE_NAME}
+      DATABASE_USER: ${DATABASE_USER}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD}
+    ports:
+      - "${APP_PORT}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   synapse_pgdata:

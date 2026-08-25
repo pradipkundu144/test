@@ -21,12 +21,16 @@ def _set_valid_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_load_settings_returns_typed_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_valid_env(monkeypatch)
     monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("APP_HOST", "127.0.0.1")
+    monkeypatch.setenv("APP_PORT", "9000")
     monkeypatch.setenv("LOG_LEVEL", "DEBUG")
 
     settings = load_settings()
 
     assert isinstance(settings, Settings)
     assert settings.app_env == "test"
+    assert settings.app_host == "127.0.0.1"
+    assert settings.app_port == 9000
     assert settings.log_level == "DEBUG"
     assert settings.database_host == "db.example.com"
     assert settings.database_port == 5433
@@ -41,6 +45,8 @@ def test_load_settings_applies_defaults(monkeypatch: pytest.MonkeyPatch) -> None
     settings = load_settings()
 
     assert settings.app_env == "local"
+    assert settings.app_host == "0.0.0.0"
+    assert settings.app_port == 8000
     assert settings.log_level == "INFO"
 
 

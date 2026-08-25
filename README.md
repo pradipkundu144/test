@@ -1,27 +1,32 @@
 # Synapse
 
 Synapse is an internal platform intended to become an AI-powered software
-development lifecycle service. This repository contains only the **first
-vertical slice**: creating a Synapse project (and its initial configuration)
-transactionally in PostgreSQL. Everything else in the eventual vision — Jira,
-GitHub, MCP, agents, RBAC, orchestration — is intentionally out of scope.
+development lifecycle service. This repository contains the first vertical
+slice: a **FastAPI** service that manages Synapse projects (create, read,
+update, delete) with PostgreSQL persistence and Alembic-managed schema.
 
 ## Current Scope
 
-- Create a Project + its initial ProjectConfiguration atomically
-- Persist to PostgreSQL, schema versioned by Alembic
-- Retrieve the aggregate by id (repository-level, used by tests)
-- Local dev via Docker Compose
-- No HTTP layer (deferred): the service is exposed through a Python CLI
+- `POST /api/v1/projects` — create a project + initial configuration atomically
+- `GET /api/v1/projects/{id}` — fetch the aggregate
+- `PATCH /api/v1/projects/{id}` — partial update on project and/or configuration
+- `DELETE /api/v1/projects/{id}` — delete (cascades to configuration)
+- `GET /health` — liveness probe
+- Swagger UI at `/docs`, OpenAPI JSON at `/openapi.json`
+
+Not in scope this slice: auth, RBAC, Jira/GitHub/Azure DevOps, MCP, AI agents,
+LLM integration, Celery/Redis/RabbitMQ, Kubernetes, notifications, event bus.
 
 ## Architecture
 
 ```
-CLI (app.main)
+HTTP client
     ↓
-ProjectService              ← business rules, transaction ownership
+FastAPI router (app/api/v1/projects.py)
     ↓
-AbstractProjectRepository   ← contract; SqlAlchemyProjectRepository impls it
+ProjectService                 business rules + transaction ownership
+    ↓
+AbstractProjectRepository      contract; SqlAlchemyProjectRepository impls it
     ↓
 SQLAlchemy 2.x
     ↓
@@ -29,16 +34,18 @@ PostgreSQL 16
 ```
 
 **Domain vs persistence.** `app/domain/entities/` holds pure-Python frozen
-dataclasses (`Project`, `ProjectConfiguration`) with zero framework coupling.
-`app/db/models/` holds the SQLAlchemy ORM models (`ProjectModel`,
-`ProjectConfigurationModel`). The repository is the only place that maps
-between them. This keeps the service testable without a database and lets the
-persistence layer evolve without touching business rules.
+dataclasses with zero framework coupling. `app/db/models/` holds the
+SQLAlchemy ORM models. The repository is the only place that maps between
+them — the service layer is framework-independent and can be reused by a
+different transport (CLI, worker, gRPC) without change.
 
-**Transaction ownership.** The service is the sole transaction owner. It opens
-one session, runs both inserts inside a single `session.begin()` block, and
-commits on success — rollback happens automatically if anything raises.
-Repositories never commit.
+**Transaction ownership.** The service opens one session per operation and
+runs the work inside a single `session.begin()` block. Any exception rolls
+back automatically. Repositories never commit.
+
+**API layer is a thin adapter.** Pydantic v2 schemas at `app/api/schemas.py`
+validate request bodies and shape responses. The service call itself is
+usually one line per route.
 
 ## Prerequisites
 
@@ -48,6 +55,8 @@ Repositories never commit.
 
 ## Setup
 
+> **For a full step-by-step runbook (Docker-only, no host Python needed), see [`docs/setup.md`](docs/setup.md).**
+
 ```bash
 # 1. Python environment
 python3 -m venv .venv
@@ -56,82 +65,110 @@ pip install -r requirements-dev.txt
 
 # 2. Environment file
 cp .env.example .env
-# edit .env if you want non-default credentials
 
-# 3. Start PostgreSQL + Adminer
+# 3. Start Postgres + Adminer
 docker compose -f local.yml up -d
 
 # 4. Apply the schema
 alembic upgrade head
+
+# 5. Run FastAPI
+uvicorn app.main:app --reload
 ```
 
-Adminer is reachable at `http://localhost:8080` (server: `postgres`, credentials
-from `.env`).
+Then open:
+- **Swagger UI:** http://localhost:8000/docs
+- **ReDoc:** http://localhost:8000/redoc
+- **Adminer:** http://localhost:8080 (server: `postgres`, creds from `.env`)
+
+Only Postgres runs in Docker locally. Uvicorn runs on the host for fast
+reloads and easy debugging. Containerizing the API can be added when the app
+is deployed somewhere.
 
 ## Environment Variables
 
-Loaded from `.env` (never commit real values). Defaults in parentheses:
+Loaded from `.env` (never commit real values). Docker Compose auto-loads the
+same file for `${VAR}` substitution in `local.yml`, so credentials are defined
+once.
 
-| Variable            | Description                          |
-|---------------------|--------------------------------------|
-| `APP_ENV`           | Environment label (`local`)          |
-| `LOG_LEVEL`         | Python logging level (`INFO`)        |
-| `DATABASE_HOST`     | Postgres host                        |
-| `DATABASE_PORT`     | Postgres port (`5432`)               |
-| `DATABASE_NAME`     | Database name                        |
-| `DATABASE_USER`     | Database user                        |
-| `DATABASE_PASSWORD` | Database password                    |
-
-The compose file reads the same file via Docker Compose's built-in `.env`
-support, so credentials are defined once.
+| Variable            | Default     | Description                     |
+|---------------------|-------------|---------------------------------|
+| `APP_ENV`           | `local`     | Environment label               |
+| `APP_HOST`          | `0.0.0.0`   | Uvicorn bind address            |
+| `APP_PORT`          | `8000`      | Uvicorn port                    |
+| `LOG_LEVEL`         | `INFO`      | Python logging level            |
+| `DATABASE_HOST`     | —           | Postgres host                   |
+| `DATABASE_PORT`     | `5432`      | Postgres port                   |
+| `DATABASE_NAME`     | —           | Database name                   |
+| `DATABASE_USER`     | —           | Database user                   |
+| `DATABASE_PASSWORD` | —           | Database password               |
 
 ## Alembic
 
 ```bash
-alembic upgrade head       # apply all pending migrations
-alembic downgrade -1       # roll back the most recent migration
-alembic current            # print the current revision
-alembic history            # list all revisions
-alembic revision --autogenerate -m "your message"    # after model changes
+alembic upgrade head            # apply all pending migrations
+alembic downgrade -1            # roll back the most recent migration
+alembic current                 # print current revision
+alembic history                 # list all revisions
+alembic revision --autogenerate -m "your message"
 ```
 
-The initial migration lives at `alembic/versions/`. Always inspect the
-autogenerated file before applying it — Alembic can miss column-type widenings
-and defaults in older revisions (we enable `compare_type` and
-`compare_server_default` to reduce this).
+Always inspect autogenerated migrations before applying them. We enable
+`compare_type` and `compare_server_default` to reduce silent drift.
 
-## Creating a Project (CLI)
+## Using the API
+
+### Create a project
 
 ```bash
-python -m app.main create-project \
-  --name "Customer Analytics Platform" \
-  --project-type NEW \
-  --source PPM \
-  --created-by pradip \
-  --description "Analytics platform for customer insights" \
-  --source-reference-id "PPM-12345" \
-  --config-json '{
-    "context": "Build a customer analytics platform",
-    "goals": "Provide analytics and reporting",
-    "scope": "Customer analytics",
-    "constraints": "Must use existing infra",
-    "tech_stack": {
-      "backend": ["Python"],
-      "frontend": ["React"],
-      "database": ["PostgreSQL"]
-    },
-    "coding_standards": "PEP 8"
-  }'
+curl -sS -X POST http://localhost:8000/api/v1/projects \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Customer Analytics Platform",
+    "project_type": "NEW",
+    "source": "PPM",
+    "created_by": "pradip",
+    "description": "Analytics platform",
+    "source_reference_id": "PPM-12345",
+    "configuration": {
+      "context": "Build a customer analytics platform",
+      "goals": "Provide analytics and reporting",
+      "scope": "Customer analytics",
+      "constraints": "Must use existing infra",
+      "tech_stack": {"backend": ["Python"], "frontend": ["React"]},
+      "coding_standards": "PEP 8"
+    }
+  }' | jq
 ```
 
-- JSON output goes to stdout (pipe to `jq` if you want).
-- Logs go to stderr.
-- Exit codes: `0` success · `2` validation error · `3` persistence failure · `4` bad configuration.
+### Fetch, update, delete
 
-Allowed enum values:
+```bash
+curl http://localhost:8000/api/v1/projects/<uuid>
+
+curl -X PATCH http://localhost:8000/api/v1/projects/<uuid> \
+  -H "Content-Type: application/json" \
+  -d '{"status": "ACTIVE", "configuration": {"goals": "Updated goals"}}'
+
+curl -X DELETE http://localhost:8000/api/v1/projects/<uuid>
+```
+
+### Allowed enum values
+
 - `project_type`: `NEW`, `EXISTING`
 - `source`: `PPM`, `OTHER`
 - `status`: `DRAFT` (assigned on create), `ACTIVE`, `ARCHIVED`
+
+### Response codes
+
+| Status | Meaning                                            |
+|--------|----------------------------------------------------|
+| 201    | Project created                                    |
+| 200    | GET / PATCH success                                |
+| 204    | Delete success (empty body)                        |
+| 404    | `project_not_found`                                |
+| 422    | Validation failure (Pydantic or domain)            |
+| 500    | Persistence failure (`project_persistence_error`)  |
 
 ## Running Tests
 
@@ -142,15 +179,13 @@ pytest tests/integration -q        # integration only
 pytest --cov=app --cov-report=term # with coverage
 ```
 
-Integration tests use the running Docker Postgres and reset the tables with
-`TRUNCATE ... CASCADE` between tests.
+Integration tests use FastAPI `TestClient` against the running Docker Postgres
+and reset tables with `TRUNCATE ... CASCADE` between tests.
 
 ## Full Reset
 
-Reproduce the environment from a clean slate — matches the acceptance flow:
-
 ```bash
-docker compose -f local.yml down -v   # destroys the volume
+docker compose -f local.yml down -v   # destroys the DB volume
 docker compose -f local.yml up -d
 alembic upgrade head
 pytest -q
@@ -161,25 +196,32 @@ pytest -q
 ```
 synapse/
 ├── app/
-│   ├── main.py                       # CLI entry point (composition root)
+│   ├── main.py                       # FastAPI app + lifespan
+│   ├── api/
+│   │   ├── dependencies.py           # DI for session_factory / service
+│   │   ├── exception_handlers.py     # domain errors → HTTP responses
+│   │   ├── schemas.py                # Pydantic v2 request/response models
+│   │   └── v1/
+│   │       ├── router.py             # aggregates v1 routers under /api/v1
+│   │       └── projects.py           # POST/GET/PATCH/DELETE
 │   ├── config/settings.py            # typed settings from env (stdlib only)
-│   ├── logging/logger.py             # reusable logging config (stderr)
-│   ├── exceptions/project.py         # ProjectError, ProjectValidationError, ProjectCreationError
+│   ├── logging/logger.py             # stderr logger
+│   ├── exceptions/project.py         # domain exception hierarchy
 │   ├── domain/
 │   │   ├── enums/project.py          # StrEnum: ProjectType/Source/Status
-│   │   └── entities/project.py       # frozen dataclasses
-│   ├── schemas/project.py            # CreateProjectInput / CreateProjectConfigurationInput
+│   │   └── entities/project.py       # frozen dataclasses (framework-free)
+│   ├── schemas/project.py            # service input dataclasses
 │   ├── db/
 │   │   ├── base.py                   # DeclarativeBase + naming convention
 │   │   ├── session.py                # engine + sessionmaker factories
 │   │   └── models/                   # SQLAlchemy ORM
 │   ├── repositories/project_repository.py    # ABC + SQLAlchemy impl
-│   └── services/project_service.py   # create_project use case
+│   └── services/project_service.py   # create/get/update/delete use cases
 ├── alembic/                          # migrations
 ├── tests/
 │   ├── unit/                         # no DB required
 │   └── integration/                  # requires Postgres
-├── local.yml                         # docker compose (postgres + adminer)
+├── local.yml                         # postgres + adminer
 ├── alembic.ini
 ├── requirements.txt / requirements-dev.txt
 ├── .env.example
@@ -188,54 +230,12 @@ synapse/
 
 ## Database Model
 
-**`projects`**
-
-| Column                | Type                         | Notes                                       |
-|-----------------------|------------------------------|---------------------------------------------|
-| `id`                  | `uuid` PK                    | app-generated `uuid4()`                     |
-| `name`                | `varchar(255)` NOT NULL      |                                             |
-| `description`         | `text`                       |                                             |
-| `project_type`        | `varchar(20)` NOT NULL       | `CHECK IN ('NEW','EXISTING')`               |
-| `source`              | `varchar(20)` NOT NULL       | `CHECK IN ('PPM','OTHER')`                  |
-| `source_reference_id` | `varchar(255)`               |                                             |
-| `status`              | `varchar(20)` NOT NULL       | `CHECK IN ('DRAFT','ACTIVE','ARCHIVED')`, indexed |
-| `created_by`          | `varchar(255)` NOT NULL      | plain identifier — no User table yet        |
-| `created_at`          | `timestamptz` NOT NULL       | `DEFAULT now()`                             |
-| `updated_at`          | `timestamptz` NOT NULL       | `DEFAULT now()`, `ONUPDATE now()` (ORM)     |
-
-Additional index: `(source, source_reference_id)`.
-
-**`project_configurations`**
-
-| Column             | Type                    | Notes                                          |
-|--------------------|-------------------------|------------------------------------------------|
-| `id`               | `uuid` PK               |                                                |
-| `project_id`       | `uuid` NOT NULL UNIQUE  | FK → `projects.id` `ON DELETE CASCADE` (1:1)   |
-| `context`          | `text` NOT NULL         |                                                |
-| `goals`            | `text` NOT NULL         |                                                |
-| `scope`            | `text` NOT NULL         |                                                |
-| `constraints`      | `text` NOT NULL         |                                                |
-| `tech_stack`       | `jsonb` NOT NULL        | naturally-structured; queryable via PG JSONB   |
-| `coding_standards` | `text` NOT NULL         |                                                |
-| `created_at`       | `timestamptz` NOT NULL  |                                                |
-| `updated_at`       | `timestamptz` NOT NULL  |                                                |
-
-Enum values live in `app/domain/enums/project.py` as `StrEnum`s and are the
-single source of truth — both the SQLAlchemy CHECK constraints and the service
-validation derive from them.
+See [`docs/erd.md`](docs/erd.md) for the ERD and request-flow diagrams.
 
 ## Development Workflow
 
 1. Change domain code / models
-2. If persistence changed: `alembic revision --autogenerate -m "..."`, inspect,
-   commit
+2. If persistence changed: `alembic revision --autogenerate -m "..."`, inspect, commit
 3. `alembic upgrade head` locally
 4. `pytest -q` — unit + integration must be green
 5. Commit on a feature branch (`feature/<slice>`), open a PR against `dev`
-
-## What's Deliberately Not Here
-
-Authentication, RBAC, user/team management, Jira/GitHub/Azure DevOps,
-MCP, AI agents, LLM integration, RAG, vector/graph DBs, Celery/Redis/RabbitMQ,
-Kubernetes, HTTP API, notifications, event bus. All belong to later slices
-and should not be introduced to serve hypothetical future needs.

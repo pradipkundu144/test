@@ -22,6 +22,14 @@ class InMemoryRepository(AbstractProjectRepository):
     def get_by_id(self, project_id: UUID) -> Project | None:
         return next((p for p in self.added if p.id == project_id), None)
 
+    def get_model_by_id(self, project_id: UUID):
+        return None
+
+    def delete(self, project_id: UUID) -> bool:
+        before = len(self.added)
+        self.added = [p for p in self.added if p.id != project_id]
+        return len(self.added) < before
+
 
 class RaisingRepository(AbstractProjectRepository):
     def add(self, project: Project) -> None:
@@ -29,6 +37,12 @@ class RaisingRepository(AbstractProjectRepository):
 
     def get_by_id(self, project_id: UUID) -> Project | None:
         return None
+
+    def get_model_by_id(self, project_id: UUID):
+        return None
+
+    def delete(self, project_id: UUID) -> bool:
+        return False
 
 
 def _mock_session_factory():

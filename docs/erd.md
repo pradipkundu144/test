@@ -1,4 +1,4 @@
-# Synapse — ERD and Project Creation Flow
+# Synapse — ERD and Request Flow
 
 ## Entity–Relationship Diagram
 
@@ -33,43 +33,73 @@ erDiagram
     }
 ```
 
-Notes:
 - `UNIQUE(project_id)` on `project_configurations` enforces the 1:1 at the DB level.
-- Additional composite index on `projects(source, source_reference_id)` for lookups by originating system.
-- Enum values live in `app/domain/enums/project.py` as `StrEnum`s and are the single source of truth for both CHECK constraints and service validation.
+- Composite index on `projects(source, source_reference_id)` for lookups by originating system.
+- Enum values live in `app/domain/enums/project.py` as `StrEnum`s — single source of truth for both CHECK constraints and service validation.
 
-## Project Creation Flow
+## API Request Flow (Create Project)
 
 ```mermaid
 flowchart TD
-    A["CLI<br/>python -m app.main create-project"] --> B[argparse]
-    B --> C["Parse --config-json"]
-    C --> D[Build CreateProjectInput]
-    D --> E["ProjectService.create_project(payload)"]
+    A["POST /api/v1/projects<br/>JSON body"] --> B["FastAPI router<br/>app/api/v1/projects.py"]
+    B --> C["ProjectCreateBody<br/>Pydantic v2 validation"]
+    C -->|invalid| D["422 project_validation_error"]
 
-    E --> F{Validate<br/>name, created_by, enums,<br/>configuration fields, tech_stack}
-    F -->|fail| G["ProjectValidationError<br/>exit 2"]
+    C -->|ok| E["body.to_input() → CreateProjectInput"]
+    E --> F["ProjectService.create_project(payload)"]
 
-    F -->|ok| H["Build Project + ProjectConfiguration entities<br/>uuid4(), datetime.now(UTC), status=DRAFT"]
-    H --> I["session = session_factory()"]
-    I --> J["BEGIN"]
-    J --> K["SqlAlchemyProjectRepository.add(project)<br/>maps entity → model, session.add"]
-    K --> L{Persist}
-    L -->|SQLAlchemyError| M["ROLLBACK<br/>ProjectCreationError raised from exc<br/>exit 3"]
-    L -->|ok| N["COMMIT<br/>(context manager exit)"]
+    F --> G{Domain validation<br/>name, enums, config fields}
+    G -->|fail| H["ProjectValidationError<br/>→ 422 project_validation_error"]
 
-    N --> O[Return Project entity]
-    O --> P["_project_to_dict → json.dumps<br/>stdout · exit 0<br/>logs on stderr"]
+    G -->|ok| I["Build Project + Configuration entities<br/>uuid4(), datetime.now(UTC), status=DRAFT"]
+    I --> J["session = session_factory()"]
+    J --> K["BEGIN"]
+    K --> L["SqlAlchemyProjectRepository.add(project)<br/>entity → model, session.add"]
+    L --> M{Persist}
+    M -->|SQLAlchemyError| N["ROLLBACK<br/>ProjectCreationError<br/>→ 500 project_persistence_error"]
+    M -->|ok| O["COMMIT"]
+
+    O --> P["ProjectResponse.from_entity"]
+    P --> Q["201 Created + JSON body"]
 ```
 
-Layering (framework-independent):
+## API Request Flow (Update / Delete)
+
+```mermaid
+flowchart TD
+    A["PATCH or DELETE<br/>/api/v1/projects/{id}"] --> B["FastAPI router"]
+    B --> C{Route}
+
+    C -->|PATCH| D["ProjectUpdateBody (Pydantic)<br/>model_dump(exclude_unset=True)"]
+    D --> E["ProjectService.update_project(id, project_changes, config_changes)"]
+
+    C -->|DELETE| F["ProjectService.delete_project(id)"]
+
+    E --> G["session.begin()"]
+    F --> G
+    G --> H["repo.get_model_by_id / repo.delete"]
+    H --> I{Found?}
+    I -->|no| J["ProjectNotFoundError<br/>→ 404 project_not_found"]
+    I -->|yes| K["Mutate model / mark for delete"]
+    K --> L["COMMIT"]
+
+    L --> M{Response}
+    M -->|PATCH| N["Reload aggregate → 200 + JSON"]
+    M -->|DELETE| O["204 No Content"]
+```
+
+## Layering (framework-independent core)
 
 ```
-CLI (app.main)
+HTTP client
     ↓
-ProjectService              business rules + transaction ownership
+FastAPI router + Pydantic schemas    thin adapter
     ↓
-AbstractProjectRepository   contract; SqlAlchemyProjectRepository implements
+ProjectService                        business rules + transactions
+    ↓
+AbstractProjectRepository             contract
+    ↓
+SqlAlchemyProjectRepository (impl)
     ↓
 SQLAlchemy 2.x
     ↓

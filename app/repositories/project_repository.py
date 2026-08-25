@@ -20,6 +20,12 @@ class AbstractProjectRepository(ABC):
     @abstractmethod
     def get_by_id(self, project_id: UUID) -> Project | None: ...
 
+    @abstractmethod
+    def get_model_by_id(self, project_id: UUID) -> ProjectModel | None: ...
+
+    @abstractmethod
+    def delete(self, project_id: UUID) -> bool: ...
+
 
 class SqlAlchemyProjectRepository(AbstractProjectRepository):
     def __init__(self, session: Session) -> None:
@@ -29,13 +35,24 @@ class SqlAlchemyProjectRepository(AbstractProjectRepository):
         self._session.add(_project_to_model(project))
 
     def get_by_id(self, project_id: UUID) -> Project | None:
+        model = self.get_model_by_id(project_id)
+        return None if model is None else _model_to_project(model)
+
+    def get_model_by_id(self, project_id: UUID) -> ProjectModel | None:
+        # returns the live ORM model so the service can mutate it inside the session
         stmt = (
             select(ProjectModel)
             .options(selectinload(ProjectModel.configuration))
             .where(ProjectModel.id == project_id)
         )
-        model = self._session.execute(stmt).scalar_one_or_none()
-        return None if model is None else _model_to_project(model)
+        return self._session.execute(stmt).scalar_one_or_none()
+
+    def delete(self, project_id: UUID) -> bool:
+        model = self._session.get(ProjectModel, project_id)
+        if model is None:
+            return False
+        self._session.delete(model)
+        return True
 
 
 def _project_to_model(project: Project) -> ProjectModel:

@@ -9,6 +9,8 @@ from app.db.session import create_engine_from_settings, create_session_factory
 def _fake_settings() -> Settings:
     return Settings(
         app_env="test",
+        app_host="127.0.0.1",
+        app_port=8001,
         log_level="INFO",
         database_host="localhost",
         database_port=5432,
